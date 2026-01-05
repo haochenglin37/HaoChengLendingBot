@@ -41,3 +41,21 @@ Workflow management with Waffle.io
 - Configure a date you would like your coins back, and watch the bot make sure all your coins are available to be traded or withdrawn at the beginning of that day.
 - Docker support.
 - And the best feature of all: It is absolutely free!
+
+## Running with Docker
+
+The repository now contains a simple Docker setup that works both locally and on a remote server. To run it:
+
+1. Copy `default.cfg.example` to `default.cfg` and fill in your API keys and strategy settings.
+2. Create directories for persistent data:
+   ```bash
+   mkdir -p market_data logs && touch logs/botlog.json
+   ```
+3. Build and start the container:
+   ```bash
+   docker compose build
+   docker compose up -d
+   ```
+4. Watch the logs with `docker compose logs -f`.
+
+`docker-compose.yaml` mounts `default.cfg`, `market_data/`, and `logs/` into the container so no secrets are baked into the image and all market/order data survives restarts. To override the config path, set `LENDINGBOT_CONFIG=/path/to/your.cfg` in `docker-compose.yaml` (or via `docker run -e ...`). Use `docker compose down` to stop the bot.
