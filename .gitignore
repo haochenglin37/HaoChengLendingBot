@@ -1,0 +1,13 @@
+*.pyc
+*.swp
+*.cfg
+*.json
+nohup.out
+error.log
+*.idea
+*.csv
+*.sqlite3
+*.db*
+docs/_build/
+
+venv/
