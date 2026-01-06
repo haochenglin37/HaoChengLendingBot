@@ -307,6 +307,31 @@ def _current_bucket_target_rates():
     return targets
 
 
+def _bucket_duration_value(bucket):
+    duration = None
+    if Analysis and hasattr(Analysis, 'funding_bucket_durations'):
+        duration = Analysis.funding_bucket_durations.get(bucket)
+    if duration is None:
+        duration = DEFAULT_BUCKET_DURATIONS.get(bucket, 2)
+    return duration or 2
+
+
+def _maybe_switch_bucket(bucket, current_rate, targets):
+    """
+    If a shorter bucket has an equal/higher target rate, prefer that bucket.
+    """
+    if not bucket or bucket not in BUCKET_ORDER:
+        return bucket, _bucket_duration_value(bucket), current_rate
+    bucket_index = BUCKET_ORDER.index(bucket)
+    for candidate in BUCKET_ORDER[:bucket_index]:
+        candidate_rate = targets.get(candidate)
+        if candidate_rate is None:
+            continue
+        if Decimal(str(candidate_rate)) >= Decimal(str(current_rate)):
+            return candidate, _bucket_duration_value(candidate), Decimal(str(candidate_rate))
+    return bucket, _bucket_duration_value(bucket), current_rate
+
+
 def reprice_stale_funding_offers(open_offer_summaries):
     if not funding_reprice_enabled or not open_offer_summaries:
         return False
@@ -353,6 +378,7 @@ def reprice_stale_funding_offers(open_offer_summaries):
             new_rate = min_rate
         if new_rate <= 0:
             continue
+        bucket, duration, new_rate = _maybe_switch_bucket(bucket, new_rate, targets)
         try:
             resp = create_lend_offer(currency, amount, new_rate, target_days=duration, use_exact_target=True)
             any_repriced = True
