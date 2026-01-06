@@ -220,6 +220,9 @@ irc_target = #bitbotfactory
 #fundingBucketAllocations = 2d:3,3-7d:3,8-30d:2,31-120d:2
 #fundingBucketDurations = 2d:2,3-7d:3,8-30d:8,31-120d:31,120d+:120
 #fundingBestBucketOnly = False
+#fundingRepriceEnabled = False
+#fundingRepriceSeconds = 600
+#fundingRepriceFactor = 0.98
 # PLEASE refer to the docs before attempting to use any of this. There are a lot of things here that will not work
 # correctly unless you understand what you are doing.
 #analyseCurrencies = STR,BTC,BTS,CLAM,DOGE,DASH,LTC,MAID,XMR,XRP,ETH,FCT

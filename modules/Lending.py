@@ -46,6 +46,9 @@ frrdelta = 0.0
 tracked_offers = {}
 order_metrics_conn = None
 order_metrics_db_path = None
+funding_reprice_enabled = False
+funding_reprice_seconds = 600
+funding_reprice_factor = Decimal('0.98')
 
 # limit of orders to request
 loanOrdersRequestLimit = {}
@@ -65,7 +68,8 @@ def init(cfg, api1, log1, data, maxtolend, dry_run1, analysis, notify_conf1):
     global sleep_time, sleep_time_active, sleep_time_inactive, min_daily_rate, max_daily_rate, spread_lend, \
         gap_bottom_default, gap_top_default, xday_threshold, xday_spread, xdays, min_loan_size, end_date, coin_cfg, \
         min_loan_sizes, dry_run, transferable_currencies, keep_stuck_orders, hide_coins, scheduler, gap_mode_default, \
-        exchange, analysis_method, currencies_to_analyse, all_currencies, frrasmin, frrdelta
+        exchange, analysis_method, currencies_to_analyse, all_currencies, frrasmin, frrdelta, \
+        funding_reprice_enabled, funding_reprice_seconds, funding_reprice_factor
 
     exchange = Config.get_exchange()
     init_order_metrics_storage()
@@ -98,6 +102,10 @@ def init(cfg, api1, log1, data, maxtolend, dry_run1, analysis, notify_conf1):
     analysis_method = Config.get('Daily_min', 'method', 'percentile')
     if analysis_method not in ['percentile', 'MACD']:
         raise ValueError("analysis_method: \"{0}\" is not valid, must be percentile or MACD".format(analysis_method))
+
+    funding_reprice_enabled = Config.getboolean('MarketAnalysis', 'fundingRepriceEnabled', False)
+    funding_reprice_seconds = int(Config.get('MarketAnalysis', 'fundingRepriceSeconds', 600, 60, 24 * 60 * 60))
+    funding_reprice_factor = Decimal(str(Config.get('MarketAnalysis', 'fundingRepriceFactor', 0.98, 0.5, 1.0)))
 
     sleep_time = sleep_time_active  # Start with active mode
 
@@ -235,7 +243,8 @@ def update_tracked_offers():
                 "rate": info.get('rate'),
                 "bucket": info.get('bucket'),
                 "created_at": info.get('created_at', now),
-                "duration": info.get('days')
+                "duration": info.get('days'),
+                "rate_source": info.get('rate_source')
             })
             continue
         duration_seconds = now - info.get('created_at', now)
@@ -260,6 +269,82 @@ def update_tracked_offers():
     for tracked_id in closed_ids:
         tracked_offers.pop(tracked_id, None)
     return open_summaries
+
+
+def _current_bucket_target_rates():
+    if not funding_reprice_enabled:
+        return {}
+    if not Analysis or not getattr(Analysis, 'funding_bucket_strategy', False):
+        return {}
+    recorder = getattr(Analysis, 'funding_recorder', None)
+    if not recorder:
+        return {}
+    try:
+        result = recorder.get_rate_recommendations(percentile=Analysis.funding_bucket_percentile)
+    except Exception as ex:
+        log.log("Unable to refresh bucket targets for repricing: {0}".format(ex))
+        return {}
+    recommendations = result.get("recommendations", {}) or {}
+    targets = {}
+    for bucket, info in recommendations.items():
+        if not info:
+            continue
+        rate = info.get("recommended")
+        if rate is None:
+            continue
+        targets[bucket] = Decimal(str(rate))
+    return targets
+
+
+def reprice_stale_funding_offers(open_offer_summaries):
+    if not funding_reprice_enabled or not open_offer_summaries:
+        return False
+    targets = _current_bucket_target_rates()
+    now = time.time()
+    any_repriced = False
+    for entry in open_offer_summaries:
+        created_at = entry.get("created_at", now)
+        age = now - created_at
+        if age < funding_reprice_seconds:
+            continue
+        order_id = entry.get("order_id")
+        currency = entry.get("currency")
+        bucket = entry.get("bucket")
+        duration = entry.get("duration") or 2
+        amount = entry.get("amount")
+        if order_id is None or currency is None:
+            continue
+        try:
+            msg = api.cancel_loan_offer(currency, order_id)
+            log.log("Repricing: canceled {0} offer #{1} open for {2:.1f}s. {3}".format(
+                currency, order_id, age, log.digestApiMsg(msg)))
+        except Exception as ex:
+            log.log("Failed to cancel offer #{0} for repricing: {1}".format(order_id, ex))
+            continue
+        tracked_offers.pop(order_id, None)
+        target_rate = targets.get(bucket)
+        if target_rate is None:
+            try:
+                target_rate = Decimal(str(entry.get("rate", 0)))
+            except Exception:
+                target_rate = Decimal('0')
+        new_rate = target_rate * funding_reprice_factor
+        min_rate = get_min_daily_rate(currency)
+        if new_rate < min_rate:
+            new_rate = min_rate
+        if new_rate <= 0:
+            continue
+        try:
+            resp = create_lend_offer(currency, amount, new_rate, target_days=duration, use_exact_target=True)
+            any_repriced = True
+            if resp and (resp.get('orderId') or resp.get('orderID')):
+                new_order_id = str(resp.get('orderId') or resp.get('orderID'))
+                track_offer(new_order_id, currency, amount, new_rate, duration, bucket, 'repriced')
+                log.log("Repriced order #{0}: {1:.4f}% for {2}d bucket {3}".format(
+                    new_order_id, float(new_rate) * 100, duration, bucket or '-'))
+        except Exception as ex:
+            log.log("Failed to place repriced offer for {0}: {1}".format(currency, ex))
+    return any_repriced
 
 
 def handle_min_amount_exception(active_cur, exception):
@@ -434,6 +519,9 @@ def cancel_all():
 
 def lend_all():
     open_offer_summaries = update_tracked_offers()
+    repriced = reprice_stale_funding_offers(open_offer_summaries)
+    if repriced:
+        open_offer_summaries = update_tracked_offers()
     total_lent = Data.get_total_lent()[0]
     lending_balances = api.return_available_account_balances("lending")['lending']
     if log:
@@ -467,7 +555,7 @@ def lend_all():
                     )
                 )
             log.log("Open funding offers:\n{0}".format("\n".join(lines)))
-    if dry_run:  # just fake some numbers, if dryrun (testing)
+            if dry_run:  # just fake some numbers, if dryrun (testing)
         lending_balances = Data.get_on_order_balances()
 
     # Fill the (maxToLend) balances on the botlog.json for display it on the web
