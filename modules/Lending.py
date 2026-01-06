@@ -5,6 +5,7 @@ from decimal import Decimal
 import sched
 import time
 import threading
+from modules.MarketAnalysis import BUCKET_ORDER
 Config = None
 api = None
 log = None
