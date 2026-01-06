@@ -183,30 +183,39 @@ def should_use_funding_bucket_strategy(currency):
     return Analysis.use_funding_bucket_strategy(currency)
 
 
-def track_offer(order_id, currency, amount, rate, days, bucket, rate_source=None):
+def track_offer(order_id, currency, amount, rate, days, bucket,
+                rate_source=None, repriced_count=0, initial_created_at=None):
     if dry_run:
         return
     if not order_id:
         return
     try:
+        now_ts = time.time()
+        first_created = initial_created_at if initial_created_at is not None else now_ts
         tracked_offers[str(order_id)] = {
             "currency": currency,
             "amount": Decimal(amount),
             "rate": Decimal(rate),
             "days": int(days),
             "bucket": bucket,
-            "created_at": time.time(),
-            "rate_source": rate_source
+            "created_at": now_ts,
+            "initial_created_at": first_created,
+            "rate_source": rate_source,
+            "repriced_count": int(repriced_count or 0)
         }
     except Exception:
+        now_ts = time.time()
+        first_created = initial_created_at if initial_created_at is not None else now_ts
         tracked_offers[str(order_id)] = {
             "currency": currency,
             "amount": amount,
             "rate": rate,
             "days": days,
             "bucket": bucket,
-            "created_at": time.time(),
-            "rate_source": rate_source
+            "created_at": now_ts,
+            "initial_created_at": first_created,
+            "rate_source": rate_source,
+            "repriced_count": int(repriced_count or 0)
         }
 
 
@@ -243,8 +252,10 @@ def update_tracked_offers():
                 "rate": info.get('rate'),
                 "bucket": info.get('bucket'),
                 "created_at": info.get('created_at', now),
+                "initial_created_at": info.get('initial_created_at', info.get('created_at', now)),
                 "duration": info.get('days'),
-                "rate_source": info.get('rate_source')
+                "rate_source": info.get('rate_source'),
+                "repriced_count": info.get('repriced_count', 0)
             })
             continue
         duration_seconds = now - info.get('created_at', now)
@@ -333,7 +344,10 @@ def reprice_stale_funding_offers(open_offer_summaries):
                 target_rate = Decimal(str(entry.get("rate", 0)))
             except Exception:
                 target_rate = Decimal('0')
-        new_rate = target_rate * funding_reprice_factor
+        prior_reprice_count = int(entry.get("repriced_count", 0) or 0)
+        new_reprice_count = prior_reprice_count + 1
+        factor_power = funding_reprice_factor ** new_reprice_count
+        new_rate = target_rate * factor_power
         min_rate = get_min_daily_rate(currency)
         if new_rate < min_rate:
             new_rate = min_rate
@@ -344,7 +358,17 @@ def reprice_stale_funding_offers(open_offer_summaries):
             any_repriced = True
             if resp and (resp.get('orderId') or resp.get('orderID')):
                 new_order_id = str(resp.get('orderId') or resp.get('orderID'))
-                track_offer(new_order_id, currency, amount, new_rate, duration, bucket, 'repriced')
+                track_offer(
+                    new_order_id,
+                    currency,
+                    amount,
+                    new_rate,
+                    duration,
+                    bucket,
+                    'repriced',
+                    new_reprice_count,
+                    entry.get("initial_created_at", entry.get("created_at"))
+                )
                 log.log("Repriced order #{0}: {1:.4f}% for {2}d bucket {3}".format(
                     new_order_id, float(new_rate) * 100, duration, bucket or '-'))
         except Exception as ex:
@@ -375,7 +399,7 @@ def record_order_fill(order_id, info, closed_ts, wait_seconds):
     if order_metrics_conn is None or not order_id:
         return
     try:
-        opened_ts = float(info.get('created_at', closed_ts))
+        opened_ts = float(info.get('initial_created_at', info.get('created_at', closed_ts)))
     except Exception:
         opened_ts = closed_ts
     try:
@@ -536,7 +560,9 @@ def lend_all():
             lines = []
             for entry in open_offer_summaries:
                 age = now - entry.get("created_at", now)
+                initial_age = now - entry.get("initial_created_at", entry.get("created_at", now))
                 minutes = age / 60 if age else 0
+                total_minutes = initial_age / 60 if initial_age else 0
                 amount = entry.get("amount") or 0
                 try:
                     amount = float(amount)
@@ -548,7 +574,7 @@ def lend_all():
                 except Exception:
                     rate_pct = rate_value
                 lines.append(
-                    "  #{order_id} {amount:.4f} {cur} @ {rate:.4f}% ({bucket}, {duration}d) open {age:.1f}s (~{minutes:.1f}m)".format(
+                    "  #{order_id} {amount:.4f} {cur} @ {rate:.4f}% ({bucket}, {duration}d) open {age:.1f}s (~{minutes:.1f}m), total {total_age:.1f}s (~{total_minutes:.1f}m)".format(
                         order_id=entry.get("order_id"),
                         amount=amount,
                         cur=entry.get("currency", ""),
@@ -556,7 +582,9 @@ def lend_all():
                         bucket=entry.get("bucket") or "-",
                         duration=entry.get("duration") or "-",
                         age=age,
-                        minutes=minutes
+                        minutes=minutes,
+                        total_age=initial_age,
+                        total_minutes=total_minutes
                     )
                 )
             log.log("Open funding offers:\n{0}".format("\n".join(lines)))
