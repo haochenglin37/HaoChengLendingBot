@@ -555,7 +555,7 @@ def lend_all():
                     )
                 )
             log.log("Open funding offers:\n{0}".format("\n".join(lines)))
-            if dry_run:  # just fake some numbers, if dryrun (testing)
+    if dry_run:  # just fake some numbers, if dryrun (testing)
         lending_balances = Data.get_on_order_balances()
 
     # Fill the (maxToLend) balances on the botlog.json for display it on the web
