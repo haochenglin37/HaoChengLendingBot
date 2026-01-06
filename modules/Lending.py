@@ -315,7 +315,12 @@ def reprice_stale_funding_offers(open_offer_summaries):
         if order_id is None or currency is None:
             continue
         try:
-            msg = api.cancel_loan_offer(currency, order_id)
+            order_id_int = int(order_id)
+        except (TypeError, ValueError):
+            log.log("Unable to reprice offer #{0}: invalid id".format(order_id))
+            continue
+        try:
+            msg = api.cancel_loan_offer(currency, order_id_int)
             log.log("Repricing: canceled {0} offer #{1} open for {2:.1f}s. {3}".format(
                 currency, order_id, age, log.digestApiMsg(msg)))
         except Exception as ex:
