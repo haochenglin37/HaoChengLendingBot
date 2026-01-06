@@ -165,12 +165,15 @@ def init_order_metrics_storage():
         "opened_ts REAL,"
         "closed_ts REAL,"
         "wait_seconds REAL,"
-        "rate_source TEXT)"
+        "rate_source TEXT,"
+        "repriced_count INTEGER DEFAULT 0)"
     )
     try:
         columns = [row[1] for row in order_metrics_conn.execute("PRAGMA table_info(order_fills)")]
         if 'rate_source' not in columns:
             order_metrics_conn.execute("ALTER TABLE order_fills ADD COLUMN rate_source TEXT")
+        if 'repriced_count' not in columns:
+            order_metrics_conn.execute("ALTER TABLE order_fills ADD COLUMN repriced_count INTEGER DEFAULT 0")
     except Exception:
         pass
     order_metrics_conn.commit()
@@ -441,8 +444,8 @@ def record_order_fill(order_id, info, closed_ts, wait_seconds):
     try:
         order_metrics_conn.execute(
             "INSERT OR REPLACE INTO order_fills "
-            "(order_id, currency, bucket, amount, rate, duration, opened_ts, closed_ts, wait_seconds, rate_source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(order_id, currency, bucket, amount, rate, duration, opened_ts, closed_ts, wait_seconds, rate_source, repriced_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(order_id),
                 info.get('currency'),
@@ -453,7 +456,8 @@ def record_order_fill(order_id, info, closed_ts, wait_seconds):
                 opened_ts,
                 float(closed_ts),
                 float(wait_seconds or 0),
-                info.get('rate_source')
+                info.get('rate_source'),
+                int(info.get('repriced_count', 0) or 0)
             )
         )
         order_metrics_conn.commit()
