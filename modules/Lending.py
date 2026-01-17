@@ -50,6 +50,10 @@ order_metrics_db_path = None
 funding_reprice_enabled = False
 funding_reprice_seconds = 600
 funding_reprice_factor = Decimal('0.98')
+funding_reprice_frr_factor = Decimal('0')
+funding_reprice_frr_cache = {}
+funding_reprice_frr_cache_ttl = 60
+funding_reprice_reset_seconds = 0
 
 # limit of orders to request
 loanOrdersRequestLimit = {}
@@ -70,7 +74,9 @@ def init(cfg, api1, log1, data, maxtolend, dry_run1, analysis, notify_conf1):
         gap_bottom_default, gap_top_default, xday_threshold, xday_spread, xdays, min_loan_size, end_date, coin_cfg, \
         min_loan_sizes, dry_run, transferable_currencies, keep_stuck_orders, hide_coins, scheduler, gap_mode_default, \
         exchange, analysis_method, currencies_to_analyse, all_currencies, frrasmin, frrdelta, \
-        funding_reprice_enabled, funding_reprice_seconds, funding_reprice_factor
+        funding_reprice_enabled, funding_reprice_seconds, funding_reprice_factor, \
+        funding_reprice_frr_factor, funding_reprice_frr_cache, funding_reprice_frr_cache_ttl, \
+        funding_reprice_reset_seconds
 
     exchange = Config.get_exchange()
     init_order_metrics_storage()
@@ -107,6 +113,10 @@ def init(cfg, api1, log1, data, maxtolend, dry_run1, analysis, notify_conf1):
     funding_reprice_enabled = Config.getboolean('MarketAnalysis', 'fundingRepriceEnabled', False)
     funding_reprice_seconds = int(Config.get('MarketAnalysis', 'fundingRepriceSeconds', 600, 60, 24 * 60 * 60))
     funding_reprice_factor = Decimal(str(Config.get('MarketAnalysis', 'fundingRepriceFactor', 0.98, 0.5, 1.0)))
+    funding_reprice_frr_factor = Decimal(str(Config.get('MarketAnalysis', 'fundingRepriceFrrFloorFactor', 0.0, 0.0, 5.0)))
+    funding_reprice_frr_cache = {}
+    funding_reprice_frr_cache_ttl = int(Config.get('MarketAnalysis', 'fundingRepriceFrrCacheSeconds', 60 * 60 * 4, 60, 60 * 60 * 24))
+    funding_reprice_reset_seconds = int(Config.get('MarketAnalysis', 'fundingRepriceResetSeconds', 0, 0, 60 * 60 * 24 * 7))
 
     sleep_time = sleep_time_active  # Start with active mode
 
@@ -336,6 +346,28 @@ def _maybe_switch_bucket(bucket, current_rate, targets):
     return bucket, _bucket_duration_value(bucket), current_rate
 
 
+def _get_frr_floor_rate(currency):
+    if not funding_reprice_frr_factor or funding_reprice_frr_factor <= 0:
+        return Decimal('0')
+    if api is None or not hasattr(api, 'get_frr'):
+        return Decimal('0')
+    cache_entry = funding_reprice_frr_cache.get(currency.upper())
+    now = time.time()
+    if cache_entry:
+        cached_rate, cached_ts = cache_entry
+        if now - cached_ts <= funding_reprice_frr_cache_ttl:
+            return cached_rate
+    try:
+        frr_value = Decimal(str(api.get_frr(currency.upper())))
+        floor_rate = frr_value * funding_reprice_frr_factor
+        funding_reprice_frr_cache[currency.upper()] = (floor_rate, now)
+        return floor_rate
+    except Exception as ex:
+        if log:
+            log.log("Unable to fetch FRR for {0}: {1}".format(currency, ex))
+        return Decimal('0')
+
+
 def reprice_stale_funding_offers(open_offer_summaries):
     if not funding_reprice_enabled or not open_offer_summaries:
         return False
@@ -374,6 +406,10 @@ def reprice_stale_funding_offers(open_offer_summaries):
             except Exception:
                 target_rate = Decimal('0')
         prior_reprice_count = int(entry.get("repriced_count", 0) or 0)
+        if funding_reprice_reset_seconds:
+            total_age = now - entry.get("initial_created_at", entry.get("created_at", now))
+            if total_age >= funding_reprice_reset_seconds:
+                prior_reprice_count = 0
         new_reprice_count = prior_reprice_count + 1
         factor_power = funding_reprice_factor ** new_reprice_count
         new_rate = target_rate * factor_power
@@ -383,6 +419,11 @@ def reprice_stale_funding_offers(open_offer_summaries):
         if new_rate <= 0:
             continue
         bucket, duration, new_rate = _maybe_switch_bucket(bucket, new_rate, targets)
+        frr_floor_rate = _get_frr_floor_rate(currency)
+        if frr_floor_rate and new_rate < frr_floor_rate:
+            log.log("{0} repricing floor applied using FRR {1:.4f}%".format(
+                currency, float(frr_floor_rate * 100)))
+            new_rate = frr_floor_rate
         try:
             resp = create_lend_offer(currency, amount, new_rate, target_days=duration, use_exact_target=True)
             any_repriced = True
@@ -468,7 +509,18 @@ def record_order_fill(order_id, info, closed_ts, wait_seconds):
 
 def notify_summary(sleep_time):
     try:
-        log.notify(Data.stringify_total_lent(*Data.get_total_lent()), notify_conf)
+        total_lent, rate_lent, rate_breakdown = Data.get_total_lent()
+        summary_text = Data.stringify_total_lent(total_lent, rate_lent, rate_breakdown)
+        total_amount = sum(Decimal(v) for v in total_lent.values()) if total_lent else Decimal('0')
+        weighted_rate = Decimal('0')
+        if total_amount > 0:
+            weighted_sum = sum(Decimal(rate_lent[cur]) for cur in rate_lent)
+            weighted_rate = weighted_sum / Decimal(total_amount)
+        avg_daily_pct = weighted_rate * Decimal('100')
+        annualized_pct = weighted_rate * Decimal('36500')
+        summary_text = "{0}\nAvg daily rate: {1:.4f}% (annualized {2:.2f}%)".format(
+            summary_text, avg_daily_pct, annualized_pct)
+        log.notify(summary_text, notify_conf)
     except Exception as ex:
         message = str(ex)
         print(("Error during summary notification: {0}".format(message)))

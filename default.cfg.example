@@ -223,6 +223,9 @@ irc_target = #bitbotfactory
 #fundingRepriceEnabled = False
 #fundingRepriceSeconds = 600
 #fundingRepriceFactor = 0.98
+#fundingRepriceFrrFloorFactor = 0.6
+#fundingRepriceFrrCacheSeconds = 14400
+#fundingRepriceResetSeconds = 86400
 # PLEASE refer to the docs before attempting to use any of this. There are a lot of things here that will not work
 # correctly unless you understand what you are doing.
 #analyseCurrencies = STR,BTC,BTS,CLAM,DOGE,DASH,LTC,MAID,XMR,XRP,ETH,FCT
