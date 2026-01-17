@@ -87,9 +87,25 @@ def stringify_total_lent(total_lent, rate_lent, rate_breakdown=None):
         balances = api.return_available_account_balances("lending").get('lending', {})
     except Exception:
         balances = {}
-    if balances:
-        for currency in sorted(balances):
-            lines.append('{0:.4f} {1}'.format(Decimal(str(balances[currency])), currency))
+    try:
+        on_order = get_on_order_balances()
+    except Exception:
+        on_order = {}
+
+    currencies = sorted(set(list(balances.keys()) + list(on_order.keys())))
+    if currencies:
+        for currency in currencies:
+            try:
+                available_amount = Decimal(str(balances.get(currency, 0)))
+            except Exception:
+                available_amount = Decimal('0')
+            try:
+                on_order_amount = Decimal(str(on_order.get(currency, 0)))
+            except Exception:
+                on_order_amount = Decimal('0')
+            total_amount = available_amount + on_order_amount
+            lines.append('{0:.4f} {1} (available {2:.4f}, on-order {3:.4f})'.format(
+                total_amount, currency, available_amount, on_order_amount))
     else:
         lines.append('none')
     lines.append('')
